@@ -1,4 +1,3 @@
-
 name: GOUP 6.0 - Build APK
 
 on:
@@ -17,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Java 17
@@ -27,11 +26,15 @@ jobs:
           java-version: "17"
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools"
 
-      - name: Install Android SDK components
+      - name: Install Android SDK packages
         run: |
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          sdkmanager --install \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Find or extract GOUP project
         id: project
@@ -39,29 +42,48 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -f "settings.gradle" ] || [ -f "settings.gradle.kts" ]; then
-            ROOT="."
-          else
-            ZIP_FILE="$(find . -maxdepth 5 -type f -iname '*.zip' -print -quit || true)"
+          SETTINGS="$(find . \
+            -type f \
+            \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
+            -not -path './.git/*' \
+            -not -path '*/.gradle/*' \
+            -print -quit || true)"
 
-            if [ -n "$ZIP_FILE" ]; then
-              mkdir -p _goup_extracted
-              unzip -oq "$ZIP_FILE" -d _goup_extracted
-            fi
-
-            SETTINGS_FILE="$(find . \
+          if [ -z "$SETTINGS" ]; then
+            ZIP_FILE="$(find . \
               -type f \
-              \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
-              -not -path '*/.gradle/*' \
-              -print -quit)"
+              -iname '*.zip' \
+              -not -path './.git/*' \
+              -print -quit || true)"
 
-            if [ -z "$SETTINGS_FILE" ]; then
-              echo "ERROR: Gradle project was not found."
-              echo "Upload the GOUP project files or its ZIP to the repository."
+            if [ -z "$ZIP_FILE" ]; then
+              echo "ERROR: No Gradle project or project ZIP found."
               exit 1
             fi
 
-            ROOT="$(dirname "$SETTINGS_FILE")"
+            echo "Extracting project ZIP: $ZIP_FILE"
+            mkdir -p _goup_extracted
+            unzip -oq "$ZIP_FILE" -d _goup_extracted
+
+            SETTINGS="$(find _goup_extracted \
+              -type f \
+              \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
+              -not -path '*/.gradle/*' \
+              -print -quit || true)"
+          fi
+
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: settings.gradle was not found."
+            exit 1
+          fi
+
+          ROOT="$(dirname "$SETTINGS")"
+
+          if [ ! -f "$ROOT/app/build.gradle" ] && \
+             [ ! -f "$ROOT/app/build.gradle.kts" ]; then
+            echo "ERROR: app/build.gradle was not found."
+            echo "The project may be incomplete or ZIP structure is incorrect."
+            exit 1
           fi
 
           echo "Project directory: $ROOT"
@@ -72,27 +94,37 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Build APK
+      - name: Build debug APK
         working-directory: ${{ steps.project.outputs.dir }}
         run: gradle --no-daemon assembleDebug
 
-      - name: Check APK file
+      - name: Verify APK
         shell: bash
         run: |
-          APK="${{ steps.project.outputs.dir }}/app/build/outputs/apk/debug/app-debug.apk"
+          set -euo pipefail
 
-          if [ ! -f "$APK" ]; then
-            echo "ERROR: APK file was not generated."
+          APK_DIR="${{ steps.project.outputs.dir }}/app/build/outputs/apk/debug"
+
+          if [ ! -d "$APK_DIR" ]; then
+            echo "ERROR: APK output directory was not created."
             exit 1
           fi
 
-          echo "APK successfully generated:"
+          APK="$(find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' -print -quit)"
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: No APK file was generated."
+            exit 1
+          fi
+
+          echo "APK created successfully:"
           ls -lh "$APK"
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: GOUP-6.0-APK
           path: ${{ steps.project.outputs.dir }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          retention-days: 7
           
